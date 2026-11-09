@@ -1,5 +1,5 @@
-/* 鲸鱼专注 · 离线缓存 v8（一键导出表格） */
-const CACHE = 'whale-focus-v8';
+/* 鲸鱼专注 · 离线缓存 v9（自定义科目 / 预设 / 数据迁移版） */
+const CACHE = 'whale-focus-v9';
 const ASSETS = [
   './',
   './index.html',
