@@ -144,7 +144,8 @@
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, .9), 0 8px 20px -14px rgba(30, 64, 175, .4);
     transition: transform .16s, background .2s;
   }
-  .sync-btn svg { width: 14px; height: 14px; }
+  .sync-btn svg { width: 14px; height: 14px; flex: none; }
+  .sync-btn span { white-space: nowrap; }
   .sync-btn:active { transform: scale(.96); }
 
   /* ---------- 分页 ---------- */
@@ -605,6 +606,11 @@
     .hint { display: none; }
   }
 
+  @media (max-width: 380px) {
+    .countdown .cd-label { display: none; }
+    .sync-btn { padding: 0 11px; font-size: 11px; }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     * { animation: none !important; transition: none !important; }
   }
@@ -641,11 +647,11 @@
   </div>
   <div class="top-actions">
     <button class="countdown" id="btnCountdown" title="点击设置倒计时"><span class="cd-label" id="cdLabel">距初试</span><b id="cdDays">--</b><span>天</span><span class="cd-arrow">⌄</span></button>
-    <button class="sync-btn" id="btnSync" aria-label="更新数据">
+    <button class="sync-btn" id="btnSync" aria-label="导出数据" title="导出数据（CSV）">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M5 20h14"/>
+        <path d="M12 4v12"/><path d="M7 11l5 5 5-5"/><path d="M5 20h14"/>
       </svg>
-      <span>更新</span>
+      <span>导出数据</span>
     </button>
   </div>
 </header>
@@ -694,6 +700,7 @@
             <div class="more-actions">
               <button class="mini-btn" id="manageSubjects">管理科目</button>
               <button class="mini-btn" id="managePresets">管理预设</button>
+              <button class="mini-btn" id="importData">导入数据</button>
             </div>
           </div>
         </details>
@@ -809,6 +816,8 @@
     <p class="modal-tip" id="modalTip"></p>
   </div>
 </div>
+
+<input type="file" id="importFile" accept=".csv,.json,text/csv,application/json" hidden>
 
 <div class="toast" id="toast"></div>
 
@@ -978,6 +987,7 @@
     sleepLogList: $('#sleepLogList'),
 
     toast: $('#toast'),
+    importFile: $('#importFile'),
     modal: $('#modal'),
     modalBody: $('#modalBody'),
     modalTitle: $('#modalTitle'),
@@ -1578,6 +1588,129 @@
     toast('倒计时已更新');
   }
 
+  /* ---------- 导入数据（CSV / 旧版 JSON） ---------- */
+  function mergeSessions(list) {
+    const seen = new Set(state.sessions.map(s => `${s.ts}|${s.subject}|${s.mins}`));
+    let added = 0;
+    list.forEach(s => {
+      if (!s || !s.mins || !s.date) return;
+      const ts = Number(s.ts) || Date.now();
+      const mins = Math.round(Number(s.mins));
+      const subject = s.subject || '其他';
+      const key = `${ts}|${subject}|${mins}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      state.sessions.push({ date: s.date, ts, mins, subject });
+      added++;
+    });
+    return added;
+  }
+
+  function mergeSleep(obj) {
+    let added = 0;
+    Object.keys(obj || {}).forEach(k => {
+      const raw = obj[k];
+      if (!raw) return;
+      const hours = typeof raw === 'number' ? raw : Number(raw.hours);
+      if (!Number.isFinite(hours) || hours <= 0) return;
+      const start = typeof raw === 'object' ? (raw.start || null) : null;
+      const end = typeof raw === 'object' ? (raw.end || null) : null;
+      const cur = state.sleep[k];
+      if (!cur) {
+        state.sleep[k] = { hours: Math.round(hours * 10) / 10, start, end };
+        added++;
+      } else if (!cur.start && start) {
+        cur.start = start;
+        cur.end = end;
+      }
+    });
+    return added;
+  }
+
+  function parseCsvRows(text) {
+    const rows = [];
+    let row = [], cur = '', inQ = false;
+    const s = String(text).replace(/^\ufeff/, '');
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      if (inQ) {
+        if (ch === '"') {
+          if (s[i + 1] === '"') { cur += '"'; i++; }
+          else inQ = false;
+        } else cur += ch;
+      } else if (ch === '"') inQ = true;
+      else if (ch === ',') { row.push(cur); cur = ''; }
+      else if (ch === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; }
+      else if (ch !== '\r') cur += ch;
+    }
+    if (cur !== '' || row.length) { row.push(cur); rows.push(row); }
+    return rows;
+  }
+
+  function parseDateTime(str) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(String(str || '').trim());
+    if (!m) return null;
+    const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+    return isNaN(d.getTime()) ? null : d.getTime();
+  }
+
+  async function importFromFile(file) {
+    let text = '';
+    try { text = await file.text(); } catch (e) { toast('读取文件失败'); return; }
+
+    let addS = 0, addSl = 0;
+    try {
+      const trimmed = text.trim();
+      if (/\.json$/i.test(file.name) || trimmed.startsWith('{')) {
+        const data = JSON.parse(trimmed);
+        addS = mergeSessions(data.sessions || []);
+        addSl = mergeSleep(data.sleep || {});
+      } else {
+        const rows = parseCsvRows(text);
+        if (!rows.length) throw new Error('empty');
+        const header = rows[0].map(h => String(h).trim());
+        const idx = name => header.indexOf(name);
+        const cType = idx('类型'), cDate = idx('日期'), cStart = idx('开始'), cEnd = idx('结束');
+        const cMins = idx('时长(分钟)'), cHours = idx('时长(小时)'), cSubj = idx('科目');
+        if (cType < 0) throw new Error('bad header');
+
+        const sList = [];
+        const slMap = {};
+        for (let r = 1; r < rows.length; r++) {
+          const row = rows[r];
+          if (!row || !row[cType]) continue;
+          const type = String(row[cType]).trim();
+          const date = cDate >= 0 ? String(row[cDate] || '').trim() : '';
+          const start = cStart >= 0 ? parseDateTime(row[cStart]) : null;
+          const end = cEnd >= 0 ? parseDateTime(row[cEnd]) : null;
+          const minsRaw = cMins >= 0 ? parseInt(row[cMins], 10) : NaN;
+          const hoursRaw = cHours >= 0 ? parseFloat(row[cHours]) : NaN;
+
+          if (type === '学习') {
+            const mins = Number.isFinite(minsRaw) ? minsRaw : Math.round((hoursRaw || 0) * 60);
+            if (!mins) continue;
+            const subject = (cSubj >= 0 ? String(row[cSubj] || '').trim() : '') || '其他';
+            const ts = start || (date ? new Date(date + 'T00:00:00').getTime() : Date.now());
+            sList.push({ date: date || dkey(new Date(ts)), ts, mins, subject });
+          } else if (type === '睡眠') {
+            const hours = Number.isFinite(hoursRaw) ? hoursRaw : (Number.isFinite(minsRaw) ? minsRaw / 60 : 0);
+            if (!hours) continue;
+            const key = date || (end ? dkey(new Date(end)) : dkey(new Date()));
+            slMap[key] = { hours, start, end };
+          }
+        }
+        addS = mergeSessions(sList);
+        addSl = mergeSleep(slMap);
+      }
+    } catch (e) {
+      toast('文件格式不对：请选择导出的 CSV 或旧版 JSON');
+      return;
+    }
+
+    if (addS || addSl) { save(); renderStats(); }
+    toast(addS || addSl ? `已导入：${addS} 条学习 · ${addSl} 天睡眠` : '没有新数据（都已存在）');
+  }
+
   function restoreTimer() {
     let snap = null;
     try { snap = JSON.parse(localStorage.getItem(TKEY) || 'null'); } catch (e) {}
@@ -1648,6 +1781,12 @@
 
     $('#manageSubjects').addEventListener('click', openSubjectsModal);
     $('#managePresets').addEventListener('click', openPresetsModal);
+    $('#importData').addEventListener('click', () => el.importFile.click());
+    el.importFile.addEventListener('change', e => {
+      const f = e.target.files && e.target.files[0];
+      if (f) importFromFile(f);
+      e.target.value = '';
+    });
     el.btnCountdown.addEventListener('click', openCountdownModal);
 
     el.goalInput.addEventListener('change', () => {
@@ -1742,7 +1881,16 @@
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
 
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
-    window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
+    });
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      try {
+        if (sessionStorage.getItem('hsm-sw-reloaded')) return;
+        sessionStorage.setItem('hsm-sw-reloaded', '1');
+      } catch (e) {}
+      location.reload();
+    });
   }
 })();
 </script>

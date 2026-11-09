@@ -1,5 +1,5 @@
-/* 鲸鱼专注 · 离线缓存 v10（自定义倒计时版） */
-const CACHE = 'whale-focus-v10';
+/* 鲸鱼专注 · 离线缓存 v12（导出/导入数据版） */
+const CACHE = 'whale-focus-v12';
 const ASSETS = [
   './',
   './index.html',
@@ -10,11 +10,16 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', event => {
-  event.waitUntil(
-    caches.open(CACHE)
-      .then(cache => cache.addAll(ASSETS))
-      .then(() => self.skipWaiting())
-  );
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE);
+    await Promise.all(ASSETS.map(async url => {
+      try {
+        const res = await fetch(url, { cache: 'reload' });
+        if (res && res.ok) await cache.put(url, res);
+      } catch (e) {}
+    }));
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', event => {
