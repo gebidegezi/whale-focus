@@ -192,6 +192,34 @@
   }
 
   .subjects { position: relative; display: flex; gap: 7px; flex-wrap: wrap; justify-content: center; }
+
+  .mode-switch {
+    position: relative;
+    display: inline-flex; gap: 2px;
+    padding: 3px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .42);
+    border: 1px solid rgba(255, 255, 255, .7);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .9);
+    margin-top: 8px;
+  }
+  .mode-seg {
+    border: none; border-radius: 999px;
+    background: none;
+    color: var(--muted);
+    font: inherit; font-size: 11.5px;
+    padding: 6px 15px;
+    cursor: pointer; touch-action: manipulation;
+    transition: color .18s, background .2s, box-shadow .2s;
+  }
+  .mode-seg.active {
+    color: var(--accent-deep);
+    font-weight: 600;
+    background: rgba(255, 255, 255, .9);
+    box-shadow: 0 4px 12px -8px rgba(30, 64, 175, .5);
+  }
   .chip {
     padding: 7px 14px;
     border-radius: 999px;
@@ -217,6 +245,15 @@
   .ring-bg { fill: none; stroke: var(--track); stroke-width: 13; }
   .ring-fg { fill: none; stroke-width: 13; stroke-linecap: round; transition: stroke-dashoffset .35s linear, stroke .3s; }
   .timer-card.running .ring-fg { filter: drop-shadow(0 2px 14px rgba(59, 124, 246, .32)); }
+  .timer-card.countup .ring { animation: ringSpin 6s linear infinite; }
+  .timer-card.countup .ring-fg { filter: drop-shadow(0 0 16px rgba(59, 124, 246, .55)); }
+  @keyframes ringSpin {
+    from { transform: rotate(-90deg); }
+    to { transform: rotate(270deg); }
+  }
+  .timer-card.countup .presets { display: none; }
+  .timer-card.countup .more-body .field,
+  .timer-card.countup .more-body .switch { display: none; }
   .timer-card.celebrate .ring-fg { animation: glowPulse 1.2s ease; }
   @keyframes glowPulse {
     0% { filter: drop-shadow(0 2px 8px rgba(59, 124, 246, .25)); }
@@ -661,6 +698,10 @@
     <div class="page-inner">
       <section class="glass timer-card" id="timerCard">
         <div class="subjects" id="subjectRow"></div>
+        <div class="mode-switch" id="modeSwitch">
+          <button class="mode-seg" data-mode="countdown">倒计时</button>
+          <button class="mode-seg" data-mode="countup">正计时</button>
+        </div>
 
         <div class="ring-wrap">
           <svg class="ring" viewBox="0 0 300 300" aria-hidden="true">
@@ -705,7 +746,7 @@
           </div>
         </details>
 
-        <div class="hint">空格 开始 / 暂停　·　R 重置　·　N 跳过</div>
+        <div class="hint" id="hintText">空格 开始 / 暂停　·　R 重置　·　N 跳过</div>
       </section>
 
       <section class="glass today-card">
@@ -854,6 +895,7 @@
   const SKEY = 'hsm-sleep-start';
   const defaults = {
     focus: 25, break: 5, goal: 240, subject: '数学', auto: true,
+    timerMode: 'countdown',
     targetDate: '2027-12-25', targetLabel: '初试',
     subjects: DEFAULT_SUBJECTS.map(s => ({ ...s })),
     presets: DEFAULT_PRESETS.map(p => ({ ...p }))
@@ -896,6 +938,7 @@
     const td = new Date(s.targetDate + 'T00:00:00');
     if (isNaN(td.getTime())) s.targetDate = '2027-12-25';
     s.targetLabel = String(s.targetLabel || '初试').trim().slice(0, 8) || '初试';
+    s.timerMode = s.timerMode === 'countup' ? 'countup' : 'countdown';
     s.subject = s.subjects.some(x => x.name === s.subject) ? s.subject : s.subjects[0].name;
     s.auto = !!s.auto;
     return s;
@@ -935,7 +978,12 @@
 
   function persistTimer() {
     try {
-      localStorage.setItem(TKEY, JSON.stringify({ mode, running, endAt, remaining, totalSec, ts: Date.now() }));
+      localStorage.setItem(TKEY, JSON.stringify({
+        mode, running, endAt, remaining, totalSec,
+        timerMode: state.settings.timerMode,
+        pausedMs, pauseCount, countupMs, runStart,
+        ts: Date.now(), lastActive: Date.now()
+      }));
     } catch (e) {}
   }
 
@@ -950,6 +998,9 @@
 
     timerCard: $('#timerCard'),
     subjectRow: $('#subjectRow'),
+    modeSwitch: $('#modeSwitch'),
+    hint: $('#hintText'),
+    btnSkip: $('#btnSkip'),
     time: $('#timeText'),
     modeLabel: $('#modeLabel'),
     ring: $('#ringFg'),
@@ -1020,28 +1071,59 @@
   let endAt = 0;
   let lastPersist = 0;
   let sleepStart = 0;
+  let countupMs = 0;
+  let runStart = 0;
+  let pausedMs = 0;
+  let pauseCount = 0;
+  let pauseStart = 0;
+  let pendingStale = null;
+  let pendingFinish = null;
   try { sleepStart = Number(localStorage.getItem(SKEY)) || 0; } catch (e) {}
 
   const preset = m => m === 'focus'
     ? Math.max(1, state.settings.focus) * 60
     : Math.max(0, state.settings.break) * 60;
 
+  const isCountup = () => state.settings.timerMode === 'countup';
+
   function start() {
     if (running) return;
     if (sleepStart) { toast('睡眠计时进行中，先结束睡眠计时'); return; }
+    const now = Date.now();
+    if (pauseStart) { pausedMs += now - pauseStart; pauseStart = 0; }
+    if (isCountup()) {
+      runStart = now;
+      running = true;
+      render();
+      persistTimer();
+      return;
+    }
     if (remaining <= 0) remaining = totalSec;
     running = true;
-    endAt = Date.now() + remaining * 1000;
-    lastPersist = Date.now();
+    endAt = now + remaining * 1000;
+    lastPersist = now;
     render();
     persistTimer();
   }
 
   function pause() {
     if (!running) return;
-    remaining = Math.max(0, Math.round((endAt - Date.now()) / 1000));
+    const now = Date.now();
+    if (isCountup()) {
+      countupMs += Math.max(0, now - runStart);
+      runStart = 0;
+      running = false;
+      pauseStart = now;
+      pauseCount++;
+      render();
+      persistTimer();
+      return;
+    }
+    remaining = Math.max(0, Math.round((endAt - now) / 1000));
     running = false;
     endAt = 0;
+    pauseStart = now;
+    pauseCount++;
     render();
     persistTimer();
   }
@@ -1051,6 +1133,11 @@
   function reset() {
     running = false;
     endAt = 0;
+    countupMs = 0;
+    runStart = 0;
+    pausedMs = 0;
+    pauseCount = 0;
+    pauseStart = 0;
     totalSec = preset(mode);
     remaining = totalSec;
     render();
@@ -1058,12 +1145,14 @@
   }
 
   function skip() {
+    if (isCountup()) return;
     const done = mode;
     let next = done === 'focus' ? 'break' : 'focus';
     if (next === 'break' && preset('break') <= 0) next = 'focus';
     mode = next;
     totalSec = preset(mode); remaining = totalSec;
     running = false; endAt = 0;
+    pausedMs = 0; pauseCount = 0; pauseStart = 0;
     render(); persistTimer();
     if (done === 'focus' && next === 'focus') toast('休息设为 0 分钟，直接继续专注');
     else toast(done === 'focus' ? '已跳过专注，进入休息' : '已跳过休息，回到专注');
@@ -1076,11 +1165,12 @@
 
     if (done === 'focus') {
       const mins = Math.round(totalSec / 60);
-      recordSession(mins);
+      recordSession(mins, { pausedMin: Math.round(pausedMs / 60000), pauses: pauseCount });
       toast(`专注完成 · 记录 ${mins} 分钟`);
     } else {
       toast('休息结束，继续下一段');
     }
+    pausedMs = 0; pauseCount = 0; pauseStart = 0;
     celebrate();
 
     let next = done === 'focus' ? 'break' : 'focus';
@@ -1101,17 +1191,28 @@
   setInterval(() => {
     if (sleepStart) el.sleepLive.textContent = fmtElapsed(Date.now() - sleepStart);
     if (!running) return;
+    if (isCountup()) {
+      renderTime();
+      if (Date.now() - lastPersist > 4000) { lastPersist = Date.now(); persistTimer(); }
+      return;
+    }
     const rem = Math.round((endAt - Date.now()) / 1000);
     if (rem <= 0) { complete(); return; }
     if (rem !== remaining) {
       remaining = rem;
       renderTime();
-      if (Date.now() - lastPersist > 10000) { lastPersist = Date.now(); persistTimer(); }
+      if (Date.now() - lastPersist > 4000) { lastPersist = Date.now(); persistTimer(); }
     }
   }, 250);
 
   /* ---------- 渲染：计时 ---------- */
   function renderTime() {
+    if (isCountup()) {
+      const ms = countupMs + (running ? Date.now() - runStart : 0);
+      el.time.textContent = fmtElapsed(ms);
+      if (running) document.title = `${fmtElapsed(ms)} 正计时 · 鲸鱼专注`;
+      return;
+    }
     el.time.textContent = fmt(remaining);
     const frac = totalSec > 0 ? remaining / totalSec : 0;
     el.ring.style.strokeDashoffset = String(C * (1 - frac));
@@ -1119,18 +1220,44 @@
   }
 
   function render() {
-    renderTime();
-    el.modeLabel.textContent = mode === 'focus' ? '专 注' : '休 息';
+    const cu = isCountup();
+    el.timerCard.classList.toggle('countup', cu);
+    if (el.modeSwitch) $$('.mode-seg', el.modeSwitch).forEach(b => b.classList.toggle('active', b.dataset.mode === (cu ? 'countup' : 'countdown')));
+
+    if (cu) {
+      el.start.textContent = running ? '暂停' : (countupMs > 0 ? '继续' : '开始');
+      el.modeLabel.textContent = '正 计 时';
+      el.timerCard.classList.toggle('running', running);
+      el.ring.style.stroke = 'url(#gradFocus)';
+      el.ring.style.strokeDasharray = `${(C * .22).toFixed(1)} ${(C * .78).toFixed(1)}`;
+      el.ring.style.strokeDashoffset = '0';
+      if (el.btnSkip) { el.btnSkip.textContent = '✓'; el.btnSkip.title = '结束并记录 (F)'; }
+      if (el.hint) el.hint.textContent = '空格 开始 / 暂停　·　R 重置　·　F 结束并记录';
+      renderTime();
+      if (!running) document.title = '鲸鱼专注';
+      return;
+    }
+
     el.start.textContent = running ? '暂停' : (remaining > 0 && remaining < totalSec ? '继续' : '开始');
+    el.modeLabel.textContent = mode === 'focus' ? '专 注' : '休 息';
     el.timerCard.classList.toggle('running', running);
     el.ring.style.stroke = mode === 'focus' ? 'url(#gradFocus)' : 'url(#gradBreak)';
+    el.ring.style.strokeDasharray = String(C);
+    renderTime();
+    if (el.btnSkip) { el.btnSkip.textContent = '⏭'; el.btnSkip.title = '跳过 (N)'; }
+    if (el.hint) el.hint.textContent = '空格 开始 / 暂停　·　R 重置　·　N 跳过';
     if (!running) document.title = '鲸鱼专注';
   }
 
   /* ---------- 渲染：统计 ---------- */
-  function recordSession(mins) {
+  function recordSession(mins, extra) {
     const d = new Date();
-    state.sessions.push({ date: dkey(d), ts: d.getTime(), mins: Math.round(mins), subject: state.settings.subject });
+    const pausedMin = extra && Number.isFinite(extra.pausedMin) ? Math.max(0, Math.round(extra.pausedMin)) : 0;
+    const pauses = extra && Number.isFinite(extra.pauses) ? Math.max(0, Math.round(extra.pauses)) : 0;
+    state.sessions.push({
+      date: dkey(d), ts: d.getTime(), mins: Math.round(mins),
+      subject: state.settings.subject, pausedMin, pauses
+    });
     save();
     renderStats();
   }
@@ -1363,7 +1490,7 @@
   };
 
   function buildTableCsv() {
-    const rows = [['类型', '日期', '开始', '结束', '时长(分钟)', '时长(小时)', '科目', '备注']];
+    const rows = [['类型', '日期', '开始', '结束', '时长(分钟)', '时长(小时)', '科目', '备注', '暂停(分钟)', '暂停次数']];
     const items = [];
 
     state.sessions.forEach(s => {
@@ -1373,7 +1500,9 @@
         type: '学习', date: s.date, start,
         end: start + mins * 60000,
         mins, hours: Math.round(mins / 6) / 10,
-        subject: s.subject || '', note: ''
+        subject: s.subject || '', note: '',
+        pausedMin: Number(s.pausedMin) || 0,
+        pauses: Number(s.pauses) || 0
       });
     });
 
@@ -1385,7 +1514,8 @@
       items.push({
         type: '睡眠', date, start, end,
         mins: Math.round(hours * 60), hours,
-        subject: '', note: (start && end) ? '' : '仅有小时数'
+        subject: '', note: (start && end) ? '' : '仅有小时数',
+        pausedMin: 0, pauses: 0
       });
     });
 
@@ -1399,7 +1529,8 @@
         it.type, it.date,
         it.start ? fmtDateTime(it.start) : '',
         it.end ? fmtDateTime(it.end) : '',
-        it.mins, it.hours, it.subject, it.note
+        it.mins, it.hours, it.subject, it.note,
+        it.pausedMin, it.pauses
       ]);
     });
 
@@ -1466,6 +1597,7 @@
     el.modalTitle.textContent = title;
     el.modalBody.innerHTML = html;
     el.modal.dataset.mode = mode;
+    el.modalClose.textContent = (mode === 'stale' || mode === 'finishCountup') ? '取消' : '完成';
     el.modalTip.textContent = tip || '';
     el.modalTip.hidden = !tip;
     el.modal.hidden = false;
@@ -1600,7 +1732,11 @@
       const key = `${ts}|${subject}|${mins}`;
       if (seen.has(key)) return;
       seen.add(key);
-      state.sessions.push({ date: s.date, ts, mins, subject });
+      state.sessions.push({
+        date: s.date, ts, mins, subject,
+        pausedMin: Number(s.pausedMin) || 0,
+        pauses: Number(s.pauses) || 0
+      });
       added++;
     });
     return added;
@@ -1672,6 +1808,7 @@
         const idx = name => header.indexOf(name);
         const cType = idx('类型'), cDate = idx('日期'), cStart = idx('开始'), cEnd = idx('结束');
         const cMins = idx('时长(分钟)'), cHours = idx('时长(小时)'), cSubj = idx('科目');
+        const cPauseMin = idx('暂停(分钟)'), cPauseCount = idx('暂停次数');
         if (cType < 0) throw new Error('bad header');
 
         const sList = [];
@@ -1691,7 +1828,9 @@
             if (!mins) continue;
             const subject = (cSubj >= 0 ? String(row[cSubj] || '').trim() : '') || '其他';
             const ts = start || (date ? new Date(date + 'T00:00:00').getTime() : Date.now());
-            sList.push({ date: date || dkey(new Date(ts)), ts, mins, subject });
+            const pausedMin = cPauseMin >= 0 ? (parseInt(row[cPauseMin], 10) || 0) : 0;
+            const pauses = cPauseCount >= 0 ? (parseInt(row[cPauseCount], 10) || 0) : 0;
+            sList.push({ date: date || dkey(new Date(ts)), ts, mins, subject, pausedMin, pauses });
           } else if (type === '睡眠') {
             const hours = Number.isFinite(hoursRaw) ? hoursRaw : (Number.isFinite(minsRaw) ? minsRaw / 60 : 0);
             if (!hours) continue;
@@ -1711,10 +1850,169 @@
     toast(addS || addSl ? `已导入：${addS} 条学习 · ${addSl} 天睡眠` : '没有新数据（都已存在）');
   }
 
+  /* ---------- 正计时：结束 / 跨天恢复 ---------- */
+  function resetTimerState() {
+    mode = 'focus';
+    running = false;
+    endAt = 0;
+    totalSec = preset('focus');
+    remaining = totalSec;
+    countupMs = 0;
+    runStart = 0;
+    pausedMs = 0;
+    pauseCount = 0;
+    pauseStart = 0;
+  }
+
+  function finishCountup() {
+    if (!isCountup()) return;
+    if (!running && countupMs <= 0) { toast('还没有开始计时'); return; }
+    if (running) {
+      const now = Date.now();
+      countupMs += Math.max(0, now - runStart);
+      runStart = 0;
+      running = false;
+    }
+    const mins = Math.round(countupMs / 60000);
+    if (mins < 1) { render(); toast('不足 1 分钟，继续加油'); return; }
+    pendingFinish = { mins };
+    openModal('结束并记录',
+      `<div class="mrow-list">
+         <div class="mrow"><span class="psep">本次专注</span><span style="margin-left:auto">${mins} 分钟</span></div>
+         <div class="mrow"><span class="psep">暂停</span><span style="margin-left:auto">${pauseCount} 次 · ${Math.round(pausedMs / 60000)} 分钟</span></div>
+       </div>
+       <button class="madd" id="finishConfirm">记录并结束</button>
+       <button class="madd" id="finishCancel">继续计时</button>`,
+      '确认记录这次专注？', 'finishCountup');
+    render();
+    persistTimer();
+  }
+
+  function confirmFinishCountup() {
+    const p = pendingFinish;
+    pendingFinish = null;
+    closeModal();
+    if (!p) return;
+    recordSession(p.mins, { pausedMin: Math.round(pausedMs / 60000), pauses: pauseCount });
+    resetTimerState();
+    render();
+    persistTimer();
+    toast(`已记录 ${p.mins} 分钟`);
+  }
+
+  function cancelFinishCountup() {
+    pendingFinish = null;
+    closeModal();
+    start();
+  }
+
+  function switchTimerMode(m) {
+    if (state.settings.timerMode === m) return;
+    if (running || countupMs > 0 || remaining < totalSec || pausedMs > 0 || pauseCount > 0) {
+      toast('先结束当前计时再切换');
+      return;
+    }
+    state.settings.timerMode = m === 'countup' ? 'countup' : 'countdown';
+    resetTimerState();
+    save();
+    render();
+    persistTimer();
+  }
+
+  function openStaleModal() {
+    const p = pendingStale;
+    if (!p) return;
+    const last = new Date(p.lastAt);
+    const mins = Math.max(0, Math.round(p.elapsedMs / 60000));
+    openModal('上次计时没结束',
+      `<div class="mrow-list">
+         <div class="mrow"><span class="psep">开始于</span><span style="margin-left:auto;color:var(--faint)">${last.getMonth() + 1}/${last.getDate()} ${hhmm(last)}</span></div>
+         <div class="mrow"><span class="psep">已完成</span><span style="margin-left:auto">${mins} 分钟</span></div>
+       </div>
+       <button class="madd" id="staleContinue">继续这次计时</button>
+       <button class="madd" id="staleRecord">记录已完成部分（${mins} 分钟）</button>
+       <button class="madd" id="staleDiscard">放弃</button>`,
+      '跨天或离开超过 2 小时后，计时不会自动继续。', 'stale');
+  }
+
+  function applyStaleAction(kind) {
+    const p = pendingStale;
+    pendingStale = null;
+    closeModal();
+    if (!p) { render(); return; }
+    const mins = Math.max(0, Math.round(p.elapsedMs / 60000));
+
+    if (kind === 'continue') {
+      state.settings.timerMode = p.kind === 'countup' ? 'countup' : 'countdown';
+      mode = 'focus';
+      if (p.kind === 'countup') {
+        countupMs = Number(p.countupMs) || 0;
+        totalSec = 0;
+        runStart = 0;
+        running = false;
+      } else {
+        totalSec = Math.max(60, Number(p.totalSec) || preset('focus'));
+        remaining = Math.min(totalSec, Math.max(0, Number(p.remaining) || totalSec));
+        running = false;
+        endAt = 0;
+      }
+      pausedMs = Number(p.pausedMs) || 0;
+      pauseCount = Number(p.pauses) || 0;
+      pauseStart = 0;
+      save();
+      render();
+      persistTimer();
+      toast('已恢复上次进度，点开始继续');
+      return;
+    }
+
+    if (kind === 'record' && mins >= 1) {
+      recordSession(mins, { pausedMin: Math.round((Number(p.pausedMs) || 0) / 60000), pauses: Number(p.pauses) || 0 });
+    }
+    resetTimerState();
+    render();
+    persistTimer();
+    toast(kind === 'record' && mins >= 1 ? `已记录 ${mins} 分钟` : '已放弃上次计时');
+  }
+
   function restoreTimer() {
     let snap = null;
     try { snap = JSON.parse(localStorage.getItem(TKEY) || 'null'); } catch (e) {}
-    if (!snap || !snap.mode) return;
+    if (!snap) return;
+
+    const now = Date.now();
+    const last = Number(snap.lastActive) || Number(snap.ts) || 0;
+    const lastDate = last ? new Date(last) : null;
+    const gap = last ? now - last : 0;
+    const stale = !!last && (gap > 2 * 3600 * 1000 || dkey(lastDate) !== dkey(new Date(now)));
+
+    if (snap.timerMode === 'countup' || snap.mode === 'countup') state.settings.timerMode = 'countup';
+    pausedMs = Number(snap.pausedMs) || 0;
+    pauseCount = Number(snap.pauseCount) || 0;
+
+    if (isCountup()) {
+      mode = 'focus';
+      totalSec = 0;
+      remaining = 0;
+      countupMs = Number(snap.countupMs) || 0;
+      const rs = Number(snap.runStart) || 0;
+      if (snap.running && rs && last) countupMs += Math.max(0, last - rs);
+      runStart = 0;
+
+      if (stale && countupMs >= 1000) {
+        running = false;
+        pendingStale = {
+          kind: 'countup', countupMs, elapsedMs: countupMs,
+          pausedMs, pauses: pauseCount, lastAt: last
+        };
+        openStaleModal();
+        return;
+      }
+      if (!snap.running) return;
+      running = true;
+      runStart = now;
+      return;
+    }
 
     mode = snap.mode === 'break' ? 'break' : 'focus';
     if (mode === 'break' && preset('break') <= 0) mode = 'focus';
@@ -1724,17 +2022,39 @@
 
     if (!snap.running || !snap.endAt) return;
 
-    const now = Date.now();
+    if (stale) {
+      if (mode === 'break') {
+        mode = 'focus';
+        totalSec = preset('focus');
+        remaining = totalSec;
+        running = false;
+        return;
+      }
+      const elapsedMs = Math.max(0, (totalSec - remaining) * 1000);
+      running = false;
+      endAt = 0;
+      pendingStale = { kind: 'countdown', totalSec, remaining, elapsedMs, pausedMs, pauses: pauseCount, lastAt: last };
+      openStaleModal();
+      return;
+    }
+
     if (snap.endAt > now) {
       running = true;
       endAt = Number(snap.endAt);
       remaining = Math.max(0, Math.round((endAt - now) / 1000));
     } else {
-      if (mode === 'focus') recordSession(totalSec / 60);
+      if (mode === 'focus') {
+        recordSession(totalSec / 60, { pausedMin: Math.round(pausedMs / 60000), pauses: pauseCount });
+      }
+      pausedMs = 0;
+      pauseCount = 0;
       let next = mode === 'focus' ? 'break' : 'focus';
       if (next === 'break' && preset('break') <= 0) next = 'focus';
-      mode = next; totalSec = preset(mode); remaining = totalSec;
-      running = false; endAt = 0;
+      mode = next;
+      totalSec = preset(mode);
+      remaining = totalSec;
+      running = false;
+      endAt = 0;
       toast('关闭期间计时已完成，已补记本次专注');
     }
   }
@@ -1742,7 +2062,16 @@
   function bind() {
     el.start.addEventListener('click', toggle);
     $('#btnReset').addEventListener('click', reset);
-    $('#btnSkip').addEventListener('click', skip);
+    $('#btnSkip').addEventListener('click', () => {
+      if (isCountup()) finishCountup();
+      else skip();
+    });
+
+    el.modeSwitch.addEventListener('click', e => {
+      const b = e.target.closest('.mode-seg');
+      if (!b) return;
+      switchTimerMode(b.dataset.mode);
+    });
 
     el.subjectRow.addEventListener('click', e => {
       const b = e.target.closest('.chip');
@@ -1804,6 +2133,8 @@
       if (m === 'subjects') saveSubjects();
       else if (m === 'presets') savePresets();
       else if (m === 'countdown') saveCountdown();
+      else if (m === 'finishCountup') { pendingFinish = null; closeModal(); }
+      else if (m === 'stale') { pendingStale = null; closeModal(); }
       else closeModal();
     });
     el.modal.addEventListener('click', e => { if (e.target === el.modal) closeModal(); });
@@ -1841,6 +2172,11 @@
         if (di) di.value = '2027-12-25';
         return;
       }
+      if (e.target.closest('#finishConfirm')) { confirmFinishCountup(); return; }
+      if (e.target.closest('#finishCancel')) { cancelFinishCountup(); return; }
+      if (e.target.closest('#staleContinue')) { applyStaleAction('continue'); return; }
+      if (e.target.closest('#staleRecord')) { applyStaleAction('record'); return; }
+      if (e.target.closest('#staleDiscard')) { applyStaleAction('discard'); return; }
     });
 
     document.addEventListener('keydown', e => {
@@ -1848,7 +2184,8 @@
       if (e.target && e.target.matches && e.target.matches('input')) return;
       if (e.code === 'Space') { e.preventDefault(); toggle(); }
       else if (e.key === 'r' || e.key === 'R') reset();
-      else if (e.key === 'n' || e.key === 'N') skip();
+      else if (e.key === 'n' || e.key === 'N') { if (!isCountup()) skip(); }
+      else if (e.key === 'f' || e.key === 'F') { if (isCountup()) finishCountup(); }
     });
   }
 
