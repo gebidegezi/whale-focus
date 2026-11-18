@@ -251,6 +251,19 @@
     from { transform: rotate(-90deg); }
     to { transform: rotate(270deg); }
   }
+  .ring-inner { fill: none; stroke: rgba(37, 84, 190, .10); stroke-width: 1; }
+  .ring-ticks line { stroke: rgba(37, 84, 190, .22); stroke-width: 1; }
+  .ring-dot {
+    fill: #fff;
+    filter: drop-shadow(0 0 9px rgba(59, 124, 246, .7));
+    transition: opacity .25s;
+  }
+  .ring-dot-glow { fill: rgba(59, 124, 246, .5); filter: blur(6px); transition: opacity .25s; }
+  .timer-card.running:not(.countup) .ring-fg { animation: breathe 3.2s ease-in-out infinite; }
+  @keyframes breathe {
+    0%, 100% { filter: drop-shadow(0 2px 10px rgba(59, 124, 246, .22)); }
+    50% { filter: drop-shadow(0 2px 24px rgba(59, 124, 246, .48)); }
+  }
   .timer-card.countup .presets { display: none; }
   .timer-card.countup .more-body .field,
   .timer-card.countup .more-body .switch { display: none; }
@@ -264,14 +277,15 @@
   .ring-center {
     position: absolute; inset: 0;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 8px; pointer-events: none;
+    gap: 5px; pointer-events: none;
   }
+  .time-caption { font-size: 10px; letter-spacing: .3em; text-indent: .3em; color: var(--faint); }
   .time {
     font-size: clamp(46px, 11vw, 64px);
     font-weight: 200; line-height: 1; letter-spacing: .01em;
     font-variant-numeric: tabular-nums;
   }
-  .mode-label { font-size: 11px; letter-spacing: .42em; text-indent: .42em; color: var(--faint); }
+  .mode-label { font-size: 11px; letter-spacing: .14em; text-indent: .14em; color: var(--faint); }
 
   .controls { position: relative; display: flex; align-items: center; gap: 12px; margin-top: 14px; }
   .icon-btn {
@@ -716,11 +730,16 @@
               </linearGradient>
             </defs>
             <circle class="ring-bg" cx="150" cy="150" r="132"/>
+            <circle class="ring-inner" cx="150" cy="150" r="109"/>
+            <g class="ring-ticks" id="ringTicks"></g>
             <circle class="ring-fg" id="ringFg" cx="150" cy="150" r="132"/>
+            <circle class="ring-dot-glow" id="ringDotGlow" cx="150" cy="18" r="16" opacity="0"/>
+            <circle class="ring-dot" id="ringDot" cx="150" cy="18" r="6" opacity="0"/>
           </svg>
           <div class="ring-center">
+            <div class="time-caption" id="timeCaption">剩余</div>
             <div class="time" id="timeText">25:00</div>
-            <div class="mode-label" id="modeLabel">专 注</div>
+            <div class="mode-label" id="modeLabel">专注 · 25 分钟</div>
           </div>
         </div>
 
@@ -1002,8 +1021,12 @@
     hint: $('#hintText'),
     btnSkip: $('#btnSkip'),
     time: $('#timeText'),
+    timeCaption: $('#timeCaption'),
     modeLabel: $('#modeLabel'),
     ring: $('#ringFg'),
+    ringDot: $('#ringDot'),
+    ringDotGlow: $('#ringDotGlow'),
+    ringTicks: $('#ringTicks'),
     start: $('#btnStart'),
     presets: $('#presets'),
     inFocus: $('#inFocus'),
@@ -1210,12 +1233,27 @@
     if (isCountup()) {
       const ms = countupMs + (running ? Date.now() - runStart : 0);
       el.time.textContent = fmtElapsed(ms);
+      if (el.ringDot) { el.ringDot.style.opacity = '0'; el.ringDotGlow.style.opacity = '0'; }
       if (running) document.title = `${fmtElapsed(ms)} 正计时 · 鲸鱼专注`;
       return;
     }
     el.time.textContent = fmt(remaining);
     const frac = totalSec > 0 ? remaining / totalSec : 0;
     el.ring.style.strokeDashoffset = String(C * (1 - frac));
+
+    if (el.ringDot) {
+      const showDot = frac > 0.002 && frac < 0.998;
+      const a = 2 * Math.PI * frac;
+      const x = (150 + 132 * Math.cos(a)).toFixed(2);
+      const y = (150 + 132 * Math.sin(a)).toFixed(2);
+      el.ringDot.setAttribute('cx', x);
+      el.ringDot.setAttribute('cy', y);
+      el.ringDotGlow.setAttribute('cx', x);
+      el.ringDotGlow.setAttribute('cy', y);
+      el.ringDot.style.opacity = showDot ? '1' : '0';
+      el.ringDotGlow.style.opacity = showDot ? '0.55' : '0';
+    }
+
     if (running) document.title = `${fmt(remaining)} ${mode === 'focus' ? '专注中' : '休息中'} · 鲸鱼专注`;
   }
 
@@ -1226,7 +1264,8 @@
 
     if (cu) {
       el.start.textContent = running ? '暂停' : (countupMs > 0 ? '继续' : '开始');
-      el.modeLabel.textContent = '正 计 时';
+      el.timeCaption.textContent = '已专注';
+      el.modeLabel.textContent = '正计时';
       el.timerCard.classList.toggle('running', running);
       el.ring.style.stroke = 'url(#gradFocus)';
       el.ring.style.strokeDasharray = `${(C * .22).toFixed(1)} ${(C * .78).toFixed(1)}`;
@@ -1239,7 +1278,8 @@
     }
 
     el.start.textContent = running ? '暂停' : (remaining > 0 && remaining < totalSec ? '继续' : '开始');
-    el.modeLabel.textContent = mode === 'focus' ? '专 注' : '休 息';
+    el.timeCaption.textContent = (!running && remaining > 0 && remaining < totalSec) ? '已暂停' : '剩余';
+    el.modeLabel.textContent = `${mode === 'focus' ? '专注' : '休息'} · ${Math.round(totalSec / 60)} 分钟`;
     el.timerCard.classList.toggle('running', running);
     el.ring.style.stroke = mode === 'focus' ? 'url(#gradFocus)' : 'url(#gradBreak)';
     el.ring.style.strokeDasharray = String(C);
@@ -1583,6 +1623,22 @@
       if (b.classList.contains('edit')) return;
       b.classList.toggle('active', Number(b.dataset.focus) === state.settings.focus && Number(b.dataset.break) === state.settings.break);
     });
+  }
+
+  function buildRingTicks() {
+    if (!el.ringTicks) return;
+    let html = '';
+    for (let i = 0; i < 60; i++) {
+      const a = (i * 6) * Math.PI / 180;
+      const long = i % 5 === 0;
+      const r1 = 116, r2 = long ? 122 : 119.5;
+      const x1 = (150 + r1 * Math.cos(a)).toFixed(1);
+      const y1 = (150 + r1 * Math.sin(a)).toFixed(1);
+      const x2 = (150 + r2 * Math.cos(a)).toFixed(1);
+      const y2 = (150 + r2 * Math.sin(a)).toFixed(1);
+      html += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
+    }
+    el.ringTicks.innerHTML = html;
   }
 
   function toast(msg) {
@@ -2205,6 +2261,7 @@
   load();
   buildChips();
   renderPresets();
+  buildRingTicks();
   el.inFocus.value = state.settings.focus;
   el.inBreak.value = state.settings.break;
   el.autoCycle.checked = !!state.settings.auto;

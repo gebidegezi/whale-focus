@@ -1,5 +1,5 @@
-/* 鲸鱼专注 · 离线缓存 v13（正计时 + 暂停记录 + 跨天恢复版） */
-const CACHE = 'whale-focus-v13';
+/* 鲸鱼专注 · 离线缓存 v14（倒计时界面优化版） */
+const CACHE = 'whale-focus-v14';
 const ASSETS = [
   './',
   './index.html',
